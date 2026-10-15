@@ -1,210 +1,172 @@
-import datetime as dt
-import time
-
-import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+import pandas as pd
 import yfinance as yf
+from datetime import datetime
 
-st.set_page_config(page_title="台股每日 KD 追蹤", page_icon="📈", layout="wide")
+st.set_page_config(page_title="台股 KD 追蹤", page_icon="📈", layout="wide")
 
-DEFAULT_STOCKS = {
+DEFAULT_STOCKS = ["006208", "00900", "00929", "00941", "2884", "2887", "2892", "4118"]
+STOCK_NAMES = {
     "006208": "富邦台50",
+    "0050": "元大台灣50",
+    "0056": "元大高股息",
     "00900": "富邦特選高股息30",
     "00929": "復華台灣科技優息",
     "00941": "中信上游半導體",
+    "2330": "台積電",
     "2884": "玉山金",
-    "2887": "台新新光金（請確認代號資料）",
+    "2887": "台新新光金",
     "2892": "第一金",
-    "4118": "自行確認公司名稱／市場",
+    "4118": "友訊",
 }
 
-st.title("📈 台股庫存每日 KD 追蹤")
-st.caption("以日線收盤資料計算 KD(9,3,3)；預設觀察黃金交叉、死亡交叉，以及 K/D 低於 20 或高於 80。")
+if "watchlist" not in st.session_state:
+    st.session_state.watchlist = DEFAULT_STOCKS.copy()
 
-with st.sidebar:
-    st.header("設定")
-    codes_text = st.text_area(
-        "股票代號（逗號或換行分隔）",
-        value="006208,00900,00929,00941,2884,2887,2892,4118",
-        height=110,
-    )
-    period = st.selectbox("歷史資料期間", ["6mo", "1y", "2y", "5y"], index=1)
-    show_chart = st.checkbox("顯示個股 KD 走勢圖", value=True)
-    st.markdown("---")
-    st.markdown("**資料來源**：Yahoo Finance（由 yfinance 套件讀取）。")
-    st.caption("資料可能延遲、缺漏或因代號變更而無法取得；本工具不是券商報價系統。")
+st.title("📈 台股每日 KD 追蹤")
+st.caption("每日資料由 Yahoo Finance 提供；台股收盤後資料可能延遲更新。此工具僅供技術指標參考，不構成投資建議。")
 
-def parse_codes(text):
-    raw = text.replace("\n", ",").replace("，", ",").split(",")
-    return list(dict.fromkeys(x.strip() for x in raw if x.strip()))
-
-def get_history(code, period):
-    # 台股上市通常使用 .TW；上櫃通常使用 .TWO。依序嘗試兩種代碼。
-    candidates = [f"{code}.TW", f"{code}.TWO"]
-    errors = []
-    for ticker in candidates:
-        try:
-            data = yf.Ticker(ticker).history(period=period, auto_adjust=False, actions=False)
-            if data is not None and not data.empty and {"High", "Low", "Close"}.issubset(data.columns):
-                data = data[["High", "Low", "Close"]].copy()
-                data.index = pd.to_datetime(data.index).tz_localize(None)
-                data = data[~data.index.duplicated(keep="last")].sort_index()
-                # 排除沒有有效 OHLC 的列
-                data = data.dropna(subset=["High", "Low", "Close"])
-                if len(data) >= 12:
-                    return data, ticker, None
-                errors.append(f"{ticker}: 歷史資料不足")
-            else:
-                errors.append(f"{ticker}: 查無資料")
-        except Exception as e:
-            errors.append(f"{ticker}: {type(e).__name__}")
-        time.sleep(0.15)
-    return None, None, "；".join(errors)
-
-def calculate_kd(data):
-    df = data.copy()
-    low_n = df["Low"].rolling(9, min_periods=9).min()
-    high_n = df["High"].rolling(9, min_periods=9).max()
-    spread = high_n - low_n
-    rsv = ((df["Close"] - low_n) / spread.replace(0, pd.NA) * 100).fillna(50.0)
-    # 常見 KD(9,3,3) 遞迴平滑：初始 K、D = 50
-    k_values, d_values = [], []
-    k_prev = d_prev = 50.0
-    for value in rsv:
-        if pd.isna(value):
-            k = k_prev
+with st.expander("➕ 新增股票 / ➖ 刪除股票", expanded=True):
+    left, right = st.columns([2, 1])
+    with left:
+        with st.form("add_stock_form", clear_on_submit=True):
+            new_code = st.text_input("新增股票代號", placeholder="例如：2330 或 0050").strip()
+            submitted = st.form_submit_button("新增到追蹤清單", use_container_width=True)
+            if submitted:
+                code = new_code.upper().replace(".TW", "").replace(".TWO", "").strip()
+                if not code:
+                    st.warning("請先輸入股票代號。")
+                elif not code.isdigit():
+                    st.warning("請輸入數字股票代號，例如 2330、0050。")
+                elif code in st.session_state.watchlist:
+                    st.info(f"{code} 已經在追蹤清單中。")
+                else:
+                    st.session_state.watchlist.append(code)
+                    st.success(f"已新增 {code}。")
+                    st.rerun()
+    with right:
+        st.write("**目前追蹤清單**")
+        if st.session_state.watchlist:
+            remove_code = st.selectbox(
+                "選擇要刪除的股票",
+                options=st.session_state.watchlist,
+                format_func=lambda x: f"{x} {STOCK_NAMES.get(x, '')}".strip(),
+                key="remove_code",
+            )
+            if st.button("刪除此股票", use_container_width=True):
+                st.session_state.watchlist = [x for x in st.session_state.watchlist if x != remove_code]
+                st.success(f"已刪除 {remove_code}。")
+                st.rerun()
         else:
-            k = (2 / 3) * k_prev + (1 / 3) * float(value)
-        d = (2 / 3) * d_prev + (1 / 3) * k
-        k_values.append(k)
-        d_values.append(d)
-        k_prev, d_prev = k, d
-    df["K"] = k_values
-    df["D"] = d_values
-    df["RSV"] = rsv
-    return df
+            st.info("清單目前是空的，請先新增股票。")
 
-def get_signal(df):
-    if len(df) < 2:
-        return "資料不足"
-    prev, cur = df.iloc[-2], df.iloc[-1]
-    signals = []
-    if prev["K"] <= prev["D"] and cur["K"] > cur["D"]:
-        signals.append("黃金交叉")
-    elif prev["K"] >= prev["D"] and cur["K"] < cur["D"]:
-        signals.append("死亡交叉")
-    if cur["K"] < 20 or cur["D"] < 20:
-        signals.append("KD低於20")
-    if cur["K"] > 80 or cur["D"] > 80:
-        signals.append("KD高於80")
-    return "、".join(signals) if signals else "無指定訊號"
-
-codes = parse_codes(codes_text)
-if not codes:
-    st.info("請在左側輸入至少一個股票代號。")
+if not st.session_state.watchlist:
+    st.warning("請先新增至少一檔股票，才能查看 KD。")
     st.stop()
 
-if st.button("🔄 重新抓取最新資料", type="primary"):
+st.write("**目前追蹤：** " + "、".join(st.session_state.watchlist))
+if st.button("🔄 重新抓取最新資料"):
     st.cache_data.clear()
+    st.rerun()
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_one(code, period):
-    return get_history(code, period)
+def fetch_kd(code: str):
+    candidates = [f"{code}.TW", f"{code}.TWO"]
+    last_error = None
+    hist = None
+    used_symbol = None
+    for ticker in candidates:
+        try:
+            data = yf.Ticker(ticker).history(period="6mo", interval="1d", auto_adjust=False)
+            if data is not None and not data.empty and {"High", "Low", "Close"}.issubset(data.columns):
+                hist = data.dropna(subset=["High", "Low", "Close"]).copy()
+                used_symbol = ticker
+                if len(hist) >= 10:
+                    break
+        except Exception as exc:
+            last_error = str(exc)
+    if hist is None or hist.empty:
+        raise ValueError(f"查不到 {code} 的日線資料。請確認代號，或稍後再試。")
+    low_n = hist["Low"].rolling(window=9, min_periods=9).min()
+    high_n = hist["High"].rolling(window=9, min_periods=9).max()
+    spread = (high_n - low_n).replace(0, pd.NA)
+    rsv = ((hist["Close"] - low_n) / spread * 100).fillna(50)
+    k_values, d_values = [], []
+    prev_k, prev_d = 50.0, 50.0
+    for value in rsv:
+        prev_k = (2 / 3) * prev_k + (1 / 3) * float(value)
+        prev_d = (2 / 3) * prev_d + (1 / 3) * prev_k
+        k_values.append(prev_k)
+        d_values.append(prev_d)
+    hist["K"] = k_values
+    hist["D"] = d_values
+    hist["K_prev"] = hist["K"].shift(1)
+    hist["D_prev"] = hist["D"].shift(1)
+    hist["Cross"] = ""
+    golden = (hist["K"] > hist["D"]) & (hist["K_prev"] <= hist["D_prev"])
+    death = (hist["K"] < hist["D"]) & (hist["K_prev"] >= hist["D_prev"])
+    hist.loc[golden, "Cross"] = "黃金交叉"
+    hist.loc[death, "Cross"] = "死亡交叉"
+    last = hist.iloc[-1]
+    signal = last["Cross"] if last["Cross"] else ("超買區 (>80)" if last["K"] >= 80 and last["D"] >= 80 else "超賣區 (<20)" if last["K"] <= 20 and last["D"] <= 20 else "—")
+    return {
+        "code": code,
+        "name": STOCK_NAMES.get(code, ""),
+        "ticker": used_symbol or candidates[0],
+        "date": hist.index[-1].strftime("%Y-%m-%d"),
+        "close": float(last["Close"]),
+        "K": float(last["K"]),
+        "D": float(last["D"]),
+        "signal": signal,
+        "history": hist.tail(60)[["K", "D"]].copy(),
+    }
 
-rows = []
-datasets = {}
-failures = []
+results = []
+errors = []
+progress = st.progress(0, text="正在取得股票資料…")
+for i, code in enumerate(st.session_state.watchlist):
+    try:
+        results.append(fetch_kd(code))
+    except Exception as exc:
+        errors.append(f"{code}：{exc}")
+    progress.progress((i + 1) / len(st.session_state.watchlist), text=f"正在取得股票資料…（{i+1}/{len(st.session_state.watchlist)}）")
+progress.empty()
 
-with st.spinner("正在讀取股票歷史行情並計算 KD…"):
-    for code in codes:
-        data, ticker, error = load_one(code, period)
-        if data is None:
-            failures.append((code, error))
-            continue
-        kd = calculate_kd(data)
-        datasets[code] = (kd, ticker)
-        last = kd.iloc[-1]
-        prev = kd.iloc[-2] if len(kd) > 1 else last
-        close = float(last["Close"])
-        change_pct = (close / float(prev["Close"]) - 1) * 100 if float(prev["Close"]) else float("nan")
-        rows.append({
-            "代號": code,
-            "名稱": DEFAULT_STOCKS.get(code, ""),
-            "資料代號": ticker,
-            "資料日期": kd.index[-1].strftime("%Y-%m-%d"),
-            "收盤價": round(close, 2),
-            "漲跌幅(%)": round(change_pct, 2),
-            "K值": round(float(last["K"]), 2),
-            "D值": round(float(last["D"]), 2),
-            "訊號": get_signal(kd),
-        })
-
-if rows:
-    result = pd.DataFrame(rows)
-    latest_date = max(result["資料日期"])
-    st.caption(f"資料更新時間：{dt.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}（本機時間）｜最新行情日期：{latest_date}")
-    a, b, c, d = st.columns(4)
-    a.metric("成功取得", f"{len(rows)} 檔")
-    b.metric("黃金交叉", int(result["訊號"].str.contains("黃金交叉").sum()))
-    c.metric("死亡交叉", int(result["訊號"].str.contains("死亡交叉").sum()))
-    d.metric("高／低檔訊號", int(result["訊號"].str.contains("KD低於20|KD高於80", regex=True).sum()))
-
-    st.subheader("庫存 KD 總覽")
-    def highlight_signal(val):
-        if "黃金交叉" in str(val):
-            return "background-color: #d9f2e6; color: #14532d"
-        if "死亡交叉" in str(val):
-            return "background-color: #fde2e2; color: #991b1b"
-        if "KD低於20" in str(val):
-            return "background-color: #dbeafe; color: #1e40af"
-        if "KD高於80" in str(val):
-            return "background-color: #ffedd5; color: #9a3412"
-        return ""
-    st.dataframe(
-        result.style.map(highlight_signal, subset=["訊號"]),
+if results:
+    table = pd.DataFrame([{
+        "股票代號": r["code"],
+        "名稱": r["name"] or "—",
+        "資料日期": r["date"],
+        "收盤價": round(r["close"], 2),
+        "K 值": round(r["K"], 2),
+        "D 值": round(r["D"], 2),
+        "訊號": r["signal"],
+    } for r in results])
+    st.subheader("每日 KD 一覽")
+    st.dataframe(table, use_container_width=True, hide_index=True)
+    st.download_button(
+        "下載 CSV 表格",
+        data=table.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"tw_stock_kd_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
         use_container_width=True,
-        hide_index=True,
     )
-    csv = result.to_csv(index=False).encode("utf-8-sig")
-    st.download_button("下載今日總覽 CSV", data=csv, file_name=f"台股KD總覽_{dt.date.today().isoformat()}.csv", mime="text/csv")
+    st.subheader("KD 走勢")
+    selected = st.selectbox(
+        "選擇要查看走勢的股票",
+        options=[r["code"] for r in results],
+        format_func=lambda x: f"{x} {STOCK_NAMES.get(x, '')}".strip(),
+    )
+    chosen = next(r for r in results if r["code"] == selected)
+    st.caption(f"{chosen['code']} {chosen['name']}｜資料來源代號：{chosen['ticker']}｜最新資料日期：{chosen['date']}")
+    st.line_chart(chosen["history"], y=["K", "D"], use_container_width=True)
+    st.caption("K、D 值介於 0–100。常見參考：K、D 同在 80 以上為高檔區，同在 20 以下為低檔區；請勿單憑 KD 作投資決策。")
 
-    if show_chart:
-        st.subheader("個股 KD 走勢")
-        selected = st.selectbox("選擇股票", list(datasets.keys()))
-        kd, ticker = datasets[selected]
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=kd.index, y=kd["K"], mode="lines", name="K值"))
-        fig.add_trace(go.Scatter(x=kd.index, y=kd["D"], mode="lines", name="D值"))
-        fig.add_hline(y=80, line_dash="dash", annotation_text="80 高檔")
-        fig.add_hline(y=20, line_dash="dash", annotation_text="20 低檔")
-        fig.update_layout(
-            title=f"{selected} {DEFAULT_STOCKS.get(selected, '')} — KD(9,3,3)（資料代號：{ticker}）",
-            yaxis_title="KD 值", yaxis_range=[0, 100], hovermode="x unified",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
-            margin=dict(l=20, r=20, t=65, b=20),
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        st.dataframe(
-            kd[["High", "Low", "Close", "K", "D"]].tail(20).round(2).rename(
-                columns={"High":"最高價","Low":"最低價","Close":"收盤價","K":"K值","D":"D值"}
-            ),
-            use_container_width=True,
-        )
-else:
-    st.error("所有股票均未能取得資料。請確認網路連線、代號或稍後重試。")
+if errors:
+    st.subheader("部分股票無法取得資料")
+    for message in errors:
+        st.warning(message)
+    st.caption("若某檔股票代號的市場後綴不正確、Yahoo Finance 暫時沒有資料，或連線受限，就可能出現此提示。")
 
-if failures:
-    st.subheader("未能取得的代號")
-    for code, error in failures:
-        st.warning(f"{code}：{error}。可能原因包括代號變更、資料源缺漏或暫時連線失敗。")
-
-with st.expander("計算方式與使用限制"):
-    st.markdown("""
-    - 指標：KD(9,3,3)，以日線最高價、最低價、收盤價計算 RSV，再以 1/3 平滑計算 K、D。
-    - 黃金交叉：前一交易日 K ≤ D，當日 K > D；死亡交叉相反。
-    - 高低檔：只要 K 或 D 任一值低於 20，顯示「KD低於20」；任一值高於 80，顯示「KD高於80」。
-    - 訊號使用資料源最新提供的日線；若資料源當日尚未更新，顯示日期可能是上一交易日。
-    - Yahoo Finance 為非官方、可能調整的第三方資料源；不保證即時性、完整性或服務持續可用。
-    - 此工具只供個人研究，不構成投資建議；KD 訊號不保證未來漲跌。
-    """)
+st.divider()
+st.caption("提醒：新增與刪除清單目前儲存在此瀏覽器的 Streamlit 工作階段；重新開啟新工作階段時，可能會回到預設清單。若希望清單永久保存到不同裝置，需要再加入資料庫或其他儲存方式。")
